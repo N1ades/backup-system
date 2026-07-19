@@ -1,127 +1,32 @@
 # backup-system
 
-Docker-контейнер, который бэкапит проекты из `/srv` в S3/R2, определяя
-проекты и их вложенность по файлам `.backup` / `.backupignore`.
+Rust CLI for tree-based project backups to S3/R2.
 
-## Быстрый старт
-
-```bash
-cp .env.example .env
-# заполните SERVER_NAME, TIMEZONE, S3_*, TELEGRAM_* (опционально)
-docker compose up -d --build
-```
-
-По умолчанию контейнер спит и раз в сутки (см. `BACKUP_CRON`) запускает
-бэкап через системный cron. Интерактивный CLI:
-
-```bash
-docker exec -it backup-system python -m app.main cli
-```
-
-Разовые команды без меню:
-
-```bash
-docker exec -it backup-system python -m app.main backup     # бэкап сейчас
-docker exec -it backup-system python -m app.main audit      # только аудит
-docker exec -it backup-system python -m app.main restore <archive-key> --dest /restore
-```
-
-## Разметка проектов
-
-- `.backup` в папке — это корень проекта, который бэкапится отдельным архивом.
-  Файл может содержать директивы (строки вида `#ключ: значение`) и/или
-  паттерны в формате `.gitignore` того, что **включать** (слабее, чем
-  `.backupignore`):
-
-  ```
-  #remnanode
-  #cron: 0 */6 * * *
-  #keep_versions: 10
-  #keep_days: 30
-  #max_total_size: 5GB
-  some/extra/include/pattern
-  ```
-
-  Первая строка вида `#name` (без двоеточия) — короткая форма имени проекта,
-  как и раньше; можно и явно `#name: remnanode`. Директивы:
-
-  | директива | что делает | если не указана |
-  |---|---|---|
-  | `cron` | своё расписание для этого проекта (5-field cron) | `BACKUP_CRON` из `.env` |
-  | `keep_versions` | сколько последних версий хранить | без лимита по количеству |
-  | `keep_days` | сколько дней хранить версии | `RETENTION_DAYS` из `.env` |
-  | `max_total_size` | не больше скольки места суммарно (`500MB`, `5GB`, `1TB`) | без лимита |
-
-  Самую свежую версию система никогда не удалит, даже если лимиты заданы
-  так, что формально надо стереть всё — так подрезание места/версий не
-  оставит проект вообще без бэкапа.
-
-  Если директива указана некорректно (например, `#cron: chto-to-ne-to`),
-  система не падает — использует значение по умолчанию и подсвечивает
-  проблему в разделе "Config warnings" в Аудите.
-
-- `.backupignore` — паттерны в формате `.gitignore`, что **исключать**
-  (сильнее, чем `.backup`). Действует только внутри своего проекта — файлы
-  `.backupignore` с уровня выше на вложенные проекты не влияют.
-- Вложенная папка с `.backup` — отдельный проект: бэкапится своим архивом
-  (и по своему собственному расписанию/ретеншну), но в списке бэкапов
-  отображается как дочерний.
-- Файл без разметки — бэкапится (раздел "Аудит" предупредит, что не
-  размечен), кроме случая, когда содержащая его *немаркированная* папка
-  превышает `AUDIT_MAX_DIR_MB` / `AUDIT_MAX_DIR_FILES` — тогда вся папка
-  пропускается и уходит в аудит как подозрительно большая (типично для
-  `node_modules`, `.git`, `.venv` — их не ищут по имени, только по весу).
-
-## Расписание
-
-Планировщик внутри контейнера — обычный `cron`, срабатывает раз в минуту и
-для каждого проекта проверяет его *собственное* расписание (`cron` из
-`.backup`, либо `BACKUP_CRON` по умолчанию). Поменять расписание — значит
-просто отредактировать `.backup` нужного проекта, перезапуск контейнера не
-нужен: файл читается заново при каждом запуске.
-
-## Имя архива = индекс
+## Setup
 
 ```
-servername__project__subproject_2026-07-19-1201+0300.zip
+cp .env.example .env   # fill in S3/R2 + server name
+docker compose build
 ```
 
-Иерархия закодирована через `__`, дата — локальная (зона берётся из
-`TIMEZONE` и тоже пишется в имя для совместимости при переносе между
-серверами).
+## Use
 
-## Что где лежит
-
-| файл | назначение |
-|---|---|
-| `app/ignore.py` | парсинг `.backupignore`/`.backup` (директивы + gitignore-паттерны через `pathspec`) |
-| `app/settings.py` | директивы `.backup` -> типизированные настройки проекта, с фолбэком на `.env` |
-| `app/scanner.py` | поиск проектов, классификация файлов (включён/исключён/не размечен) |
-| `app/archiver.py` | сборка zip |
-| `app/storage.py` | S3/R2: upload/download/list/delete |
-| `app/backup.py` | оркестрация: due-check по cron проекта → скан → архив → аплоад → ретеншн → телеграм |
-| `app/audit.py` | отчёт: не размечено, слишком большие папки, крупные файлы |
-| `app/cli.py` | интерактивное меню (rich + questionary) |
-| `app/restore.py` | скачать и распаковать архив по его иерархии |
-| `app/telegram_notify.py` | уведомления в телеграм |
-
-## Тест
-
-```bash
-PYTHONPATH=. python3 test_core.py
+```
+docker compose run --rm backup cargo run -- scan    # list found .backup projects
+docker compose run --rm backup cargo run -- audit   # size + skipped-file report
+docker compose run --rm backup cargo run -- run      # backup + upload + retention + telegram
+docker compose run --rm backup cargo run -- tui      # browse/download/extract past backups
 ```
 
-Один файл с обычными `assert`, без фреймворков — проверяет реальную логику:
-вложенность проектов, приоритет `.backupignore` над `.backup`, порог
-"слишком большая неразмеченная папка", парсинг директив `.backup`
-(включая откат на дефолт при битой директиве), cron due-check, ретеншн
-(never-delete-the-last-copy + отсечение по `max_total_size`), round-trip
-имени архива.
+Dev mode (`docker-compose.yml`) mounts source + target/cargo caches, so `cargo watch`
+rebuilds on file change without a full re-fetch each time.
 
-## Известные упрощения (ponytail)
+## Rules recap
 
-- `.backupignore` из разных файлов внутри проекта **объединяются** (любое
-  совпадение — исключение). `!negation` работает внутри одного файла, но не
-  переопределяет исключение, заданное файлом выше по дереву — полная
-  git-семантика (scope по директориям, deepest-wins) сложнее и здесь не
-  нужна. Апгрейд-путь описан в `app/ignore.py`.
+- `.backup` marks a project root (optional `#name` first line).
+- `.backupignore` = strict `.gitignore` syntax, scoped to that project only.
+- Nested `.backup` → separate child project/archive.
+- Files/dirs over `MAX_FILE_SIZE_MB` / `MAX_DIR_FILE_COUNT` are skipped + logged
+  in audit, unless force-included with `!path` in `.backupignore`.
+- Archive name = `server__project__subproject--YYYY-MM-DD-HHMM-TZ.zip`, doubling
+  as the hierarchy index.

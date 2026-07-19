@@ -1,13 +1,18 @@
+version: "3.9"
+
 services:
-  backup-system:
+  backup:
     build: .
-    container_name: backup-system
     env_file: .env
     volumes:
-      - /srv:/srv/srv1:ro
-      - ./restore:/restore
-      # Add this line below:
-      - ./app:/opt/backup-system/app
-      # Optional: if entrypoint.sh also needs to be live-synced:
-      - ./entrypoint.sh:/opt/backup-system/entrypoint.sh
-    restart: unless-stopped
+      - .:/app
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+      - ${BACKUP_SOURCE_DIR:-/srv}:/srv:ro
+      - ${DOWNLOAD_DIR:-./downloads}:/downloads
+    stdin_open: true
+    tty: true
+
+volumes:
+  cargo-cache:
+  target-cache:

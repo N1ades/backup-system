@@ -1,18 +1,10 @@
-FROM python:3.12-slim
+FROM rust:1.85-bookworm
 
-RUN apt-get update && apt-get install -y --no-install-recommends cron \
-    && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-watch --locked
 
-WORKDIR /opt/backup-system
+WORKDIR /app
+COPY . .
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN cargo fetch
 
-COPY app ./app
-COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
-
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/opt/backup-system
-
-ENTRYPOINT ["./entrypoint.sh"]
+CMD ["cargo", "watch", "-x", "run -- run"]
