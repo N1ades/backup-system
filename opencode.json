@@ -1,4 +1,18 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "instructions": ["Always be brief. Shorten words and sentences. Keep responses concise and to the point."]
+  "instructions": ["Always be brief. Shorten words and sentences. Keep responses concise and to the point."],
+  "provider": {
+    "my-custom-provider": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "My AI ProviderDisplay Name",
+      "options": {
+        "baseURL": "http://localhost:4981/openai/v1"
+      },
+      "models": {
+        "gemini-advanced": {
+          "name": "Gemini Advanced"
+        }
+      }
+    }
+  }
 }
