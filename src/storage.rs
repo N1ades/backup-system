@@ -4,8 +4,6 @@ use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
 use std::path::Path;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
 
 pub struct RemoteObject {
     pub key: String,
@@ -36,7 +34,10 @@ fn s3_key(key: &str) -> &str {
 }
 
 pub async fn upload_file(bucket: &Bucket, local_path: &Path, key: &str) -> Result<()> {
-    let bytes = fs::read(local_path).await?;
+    let local_path = local_path.to_path_buf();
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(local_path))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to read file for upload: {e}"))?;
     bucket.put_object(s3_key(key), &bytes).await?;
     Ok(())
 }
@@ -47,8 +48,11 @@ pub async fn download_file(bucket: &Bucket, key: &str, dest: &Path) -> Result<()
     if status != 200 {
         anyhow::bail!("S3 GET {key} returned status {status}");
     }
-    let mut file = fs::File::create(dest).await?;
-    file.write_all(response.bytes()).await?;
+    let bytes = response.bytes().to_vec();
+    let dest = dest.to_path_buf();
+    tokio::task::spawn_blocking(move || std::fs::write(dest, bytes))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to write downloaded file: {e}"))?;
     Ok(())
 }
 
