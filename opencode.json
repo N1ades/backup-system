@@ -1,0 +1,4 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["Always be brief. Shorten words and sentences. Keep responses concise and to the point."]
+}

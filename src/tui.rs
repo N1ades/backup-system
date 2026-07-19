@@ -148,7 +148,10 @@ async fn download_and_extract(
     }
     std::fs::create_dir_all(&dest)?;
 
-    let tmp_zip = std::env::temp_dir().join(key);
+    let filename = std::path::Path::new(key)
+        .file_name()
+        .unwrap_or(std::ffi::OsStr::new(key));
+    let tmp_zip = std::env::temp_dir().join(filename);
     storage::download_file(bucket, key, &tmp_zip).await?;
 
     let mut archive = zip::ZipArchive::new(File::open(&tmp_zip)?)?;

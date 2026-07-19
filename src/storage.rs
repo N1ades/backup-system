@@ -31,21 +31,29 @@ pub fn bucket(cfg: &Config) -> Result<Box<Bucket>> {
     Ok(b)
 }
 
+fn s3_key(key: &str) -> &str {
+    key.strip_prefix('/').unwrap_or(key)
+}
+
 pub async fn upload_file(bucket: &Bucket, local_path: &Path, key: &str) -> Result<()> {
     let bytes = fs::read(local_path).await?;
-    bucket.put_object(format!("/{key}"), &bytes).await?;
+    bucket.put_object(s3_key(key), &bytes).await?;
     Ok(())
 }
 
 pub async fn download_file(bucket: &Bucket, key: &str, dest: &Path) -> Result<()> {
-    let response = bucket.get_object(format!("/{key}")).await?;
+    let response = bucket.get_object(s3_key(key)).await?;
+    let status = response.status_code();
+    if status != 200 {
+        anyhow::bail!("S3 GET {key} returned status {status}");
+    }
     let mut file = fs::File::create(dest).await?;
     file.write_all(response.bytes()).await?;
     Ok(())
 }
 
 pub async fn delete_object(bucket: &Bucket, key: &str) -> Result<()> {
-    bucket.delete_object(format!("/{key}")).await?;
+    bucket.delete_object(s3_key(key)).await?;
     Ok(())
 }
 

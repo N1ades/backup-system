@@ -1,2 +1,4 @@
 .env
 rust_backup.zip
+target
+downloads
