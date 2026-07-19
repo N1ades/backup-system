@@ -49,6 +49,19 @@ fn run_audit(cfg: &Config, projects: &[project::Project]) -> Result<()> {
         for w in &plan.warnings {
             println!("  ! {w}");
         }
+
+        let mut biggest: Vec<&project::PlannedFile> = plan.files.iter().collect();
+        biggest.sort_by(|a, b| b.size.cmp(&a.size));
+        if !biggest.is_empty() {
+            println!("  largest files:");
+            for pf in biggest.into_iter().take(5) {
+                println!(
+                    "    {} ({})",
+                    pf.relative.display(),
+                    format_size(pf.size, DECIMAL)
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -70,7 +83,7 @@ async fn run_backup(cfg: &Config, projects: &[project::Project]) -> Result<()> {
         let tmp_path = std::env::temp_dir().join(&filename);
 
         let started = Instant::now();
-        archive::write_zip(&plan, &tmp_path)?;
+        let archive_warnings = archive::write_zip(&plan, &tmp_path)?;
         storage::upload_file(&bucket, &tmp_path, &filename).await?;
         let _ = std::fs::remove_file(&tmp_path);
 
@@ -82,6 +95,9 @@ async fn run_backup(cfg: &Config, projects: &[project::Project]) -> Result<()> {
         );
         messages.push(format!("{filename}: {size}"));
         for w in &plan.warnings {
+            println!("  ! {w}");
+        }
+        for w in &archive_warnings {
             println!("  ! {w}");
         }
     }
@@ -105,21 +121,23 @@ async fn apply_retention(cfg: &Config, bucket: &s3::bucket::Bucket) -> Result<()
     use std::collections::HashMap;
 
     let objects = storage::list_all(bucket).await?;
-    let mut by_chain: HashMap<(String, Vec<String>), Vec<storage::RemoteObject>> = HashMap::new();
+    let mut by_chain: HashMap<(String, Vec<String>), Vec<(String, String)>> = HashMap::new();
     for obj in objects {
         if let Some(parsed) = naming::parse_archive_filename(&obj.key) {
             by_chain
                 .entry((parsed.server, parsed.chain))
                 .or_default()
-                .push(obj);
+                .push((parsed.timestamp, obj.key));
         }
     }
 
     for (_, mut group) in by_chain {
-        group.sort_by(|a, b| b.key.cmp(&a.key));
-        for stale in group.into_iter().skip(cfg.retention_keep) {
-            storage::delete_object(bucket, &stale.key).await?;
-            println!("removed old backup {}", stale.key);
+        // timestamp format is fixed-width (YYYY-MM-DD-HHMM-TZ), so string
+        // order matches chronological order without needing to parse it.
+        group.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, stale_key) in group.into_iter().skip(cfg.retention_keep) {
+            storage::delete_object(bucket, &stale_key).await?;
+            println!("removed old backup {}", stale_key);
         }
     }
     Ok(())

@@ -104,21 +104,27 @@ pub struct BackupPlan {
     pub total_size: u64,
 }
 
-// Bounded scan: stops as soon as either limit is exceeded so a giant
-// directory (node_modules, .git) doesn't get fully traversed just to
-// prove it's too big. Ignored paths (per .backupignore) and nested
-// project roots are skipped so already-excluded files don't count
-// toward the parent directory's size/count.
-fn dir_exceeds_limits(
+// Bounded-ish scan: keeps going until both limits are confirmed exceeded,
+// but does not exhaustively walk further than needed to find a handful of
+// the biggest contributors, so a giant ignored-heavy tree still resolves
+// fast. Ignored paths (per .backupignore) and nested project roots are
+// skipped so already-excluded files never count toward the parent
+// directory's size/count — this is what proves the ignore is honored.
+struct DirUsage {
+    size: u64,
+    count: u64,
+    top_files: Vec<(PathBuf, u64)>,
+}
+
+fn dir_usage(
     path: &Path,
     project_root: &Path,
     gi: &Gitignore,
     nested_roots: &[&Path],
-    size_limit: u64,
-    count_limit: u64,
-) -> bool {
+) -> DirUsage {
     let mut size = 0u64;
     let mut count = 0u64;
+    let mut top_files: Vec<(PathBuf, u64)> = Vec::new();
     let walker = WalkDir::new(path).into_iter().filter_entry(|e| {
         if nested_roots.contains(&e.path()) {
             return false;
@@ -130,13 +136,34 @@ fn dir_exceeds_limits(
     for entry in walker.filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             count += 1;
-            size += entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if count > count_limit || size > size_limit {
-                return true;
-            }
+            let file_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            size += file_size;
+            top_files.push((entry.path().to_path_buf(), file_size));
         }
     }
-    false
+    top_files.sort_by(|a, b| b.1.cmp(&a.1));
+    top_files.truncate(5);
+    DirUsage {
+        size,
+        count,
+        top_files,
+    }
+}
+
+fn dir_exceeds_limits(
+    path: &Path,
+    project_root: &Path,
+    gi: &Gitignore,
+    nested_roots: &[&Path],
+    size_limit: u64,
+    count_limit: u64,
+) -> Option<DirUsage> {
+    let usage = dir_usage(path, project_root, gi, nested_roots);
+    if usage.size > size_limit || usage.count > count_limit {
+        Some(usage)
+    } else {
+        None
+    }
 }
 
 pub fn plan_backup(
@@ -174,15 +201,36 @@ pub fn plan_backup(
         if m.is_ignore() {
             return false;
         }
-        if is_dir
-            && m.is_none()
-            && dir_exceeds_limits(e.path(), &project.root, gi, &nested_roots, size_limit, count_limit)
-        {
-            warnings.borrow_mut().push(format!(
-                "skipped oversized directory {} (mark with ! in .backupignore to force-include)",
-                rel.display()
-            ));
-            return false;
+        if is_dir && m.is_none() {
+            if let Some(usage) = dir_exceeds_limits(
+                e.path(),
+                &project.root,
+                gi,
+                &nested_roots,
+                size_limit,
+                count_limit,
+            ) {
+                let contributors = usage
+                    .top_files
+                    .iter()
+                    .map(|(p, s)| {
+                        format!(
+                            "{} ({})",
+                            p.strip_prefix(&project.root).unwrap_or(p).display(),
+                            humansize::format_size(*s, humansize::DECIMAL)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                warnings.borrow_mut().push(format!(
+                    "skipped oversized directory {} ({}, {} files after ignore rules; biggest: {}) — mark with ! in .backupignore to force-include",
+                    rel.display(),
+                    humansize::format_size(usage.size, humansize::DECIMAL),
+                    usage.count,
+                    contributors
+                ));
+                return false;
+            }
         }
         true
     });
@@ -195,6 +243,16 @@ pub fn plan_backup(
         let rel = path.strip_prefix(&project.root).unwrap().to_path_buf();
         let m = gi.matched_path_or_any_parents(&rel, false);
         if m.is_ignore() {
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            // Symlinks, sockets, FIFOs, device nodes, etc. — not backupable
+            // content. Opening a socket for reading fails with ENXIO, so
+            // these must be excluded here rather than left to fail later.
+            warnings.borrow_mut().push(format!(
+                "skipped non-regular file {} (socket/fifo/device/symlink; not backed up)",
+                rel.display()
+            ));
             continue;
         }
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
