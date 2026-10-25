@@ -2,6 +2,10 @@ services:
   backup:
     build: .
     env_file: .env
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     volumes:
       - .:/app
       - cargo-cache:/usr/local/cargo/registry
