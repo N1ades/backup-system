@@ -101,6 +101,8 @@ pub struct PlannedFile {
 pub struct BackupPlan {
     pub files: Vec<PlannedFile>,
     pub warnings: Vec<String>,
+    // (path relative to the project root, "category (details)") for everything left out
+    pub skipped: Vec<(PathBuf, String)>,
     pub total_size: u64,
 }
 
@@ -187,6 +189,7 @@ pub fn plan_backup(
     let mut files = Vec::new();
     let total_size = std::cell::Cell::new(0u64);
     let warnings = std::cell::RefCell::new(Vec::new());
+    let skipped = std::cell::RefCell::new(Vec::new());
 
     let walker = WalkDir::new(&project.root).into_iter().filter_entry(|e| {
         if e.path() == project.root {
@@ -199,6 +202,9 @@ pub fn plan_backup(
         let is_dir = e.file_type().is_dir();
         let m = gi.matched_path_or_any_parents(rel, is_dir);
         if m.is_ignore() {
+            skipped
+                .borrow_mut()
+                .push((rel.to_path_buf(), "ignored by .backupignore".to_string()));
             return false;
         }
         if is_dir && m.is_none() {
@@ -222,6 +228,14 @@ pub fn plan_backup(
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
+                skipped.borrow_mut().push((
+                    rel.to_path_buf(),
+                    format!(
+                        "oversized directory ({}, {} files)",
+                        humansize::format_size(usage.size, humansize::DECIMAL),
+                        usage.count
+                    ),
+                ));
                 warnings.borrow_mut().push(format!(
                     "skipped oversized directory {} ({}, {} files after ignore rules; biggest: {}) — mark with ! in .backupignore to force-include",
                     rel.display(),
@@ -249,6 +263,10 @@ pub fn plan_backup(
             // Symlinks, sockets, FIFOs, device nodes, etc. — not backupable
             // content. Opening a socket for reading fails with ENXIO, so
             // these must be excluded here rather than left to fail later.
+            skipped.borrow_mut().push((
+                rel.clone(),
+                "non-regular file (socket/fifo/device/symlink)".to_string(),
+            ));
             warnings.borrow_mut().push(format!(
                 "skipped non-regular file {} (socket/fifo/device/symlink; not backed up)",
                 rel.display()
@@ -257,6 +275,10 @@ pub fn plan_backup(
         }
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         if m.is_none() && size > size_limit {
+            skipped.borrow_mut().push((
+                rel.clone(),
+                format!("oversized file ({})", humansize::format_size(size, humansize::DECIMAL)),
+            ));
             warnings.borrow_mut().push(format!(
                 "skipped oversized file {} ({} bytes, mark with ! in .backupignore to force-include)",
                 rel.display(),
@@ -275,6 +297,7 @@ pub fn plan_backup(
     BackupPlan {
         files,
         warnings: warnings.into_inner(),
+        skipped: skipped.into_inner(),
         total_size: total_size.get(),
     }
 }

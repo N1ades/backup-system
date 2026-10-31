@@ -2,6 +2,7 @@ mod archive;
 mod config;
 mod naming;
 mod project;
+mod snapshot;
 mod storage;
 mod telegram;
 mod tui;
@@ -24,7 +25,14 @@ struct Cli {
 enum Command {
     Scan,
     Audit,
-    Run,
+    /// Pack the whole server into one snapshot archive and upload it
+    Run {
+        /// Build the archive into DOWNLOAD_DIR and skip upload/retention/notification
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Print the snapshot tree (what is included and what is skipped)
+    Tree,
     Tui,
 }
 
@@ -66,53 +74,63 @@ fn run_audit(cfg: &Config, projects: &[project::Project]) -> Result<()> {
     Ok(())
 }
 
-async fn run_backup(cfg: &Config, projects: &[project::Project]) -> Result<()> {
-    let bucket = storage::bucket(cfg)?;
-    let mut messages = Vec::new();
-
-    for idx in 0..projects.len() {
-        let p = &projects[idx];
-        let gi = build_gitignore(p, projects)?;
-        let plan = plan_backup(idx, projects, &gi, cfg);
-        if plan.files.is_empty() {
-            continue;
-        }
-
-        let chain = p.chain(projects);
-        let filename = naming::archive_filename(&cfg.server_name, &chain, cfg.timezone);
-        let tmp_path = std::env::temp_dir().join(&filename);
-
-        let started = Instant::now();
-        let archive_warnings = archive::write_zip(&plan, &tmp_path)?;
-        storage::upload_file(&bucket, &tmp_path, &filename).await?;
-        let _ = std::fs::remove_file(&tmp_path);
-
-        let size = format_size(plan.total_size, DECIMAL);
-        println!(
-            "backed up {} -> {filename} ({size}, {:.1}s)",
-            chain.join("/"),
-            started.elapsed().as_secs_f32()
-        );
-        messages.push(format!("{filename}: {size}"));
-        for w in &plan.warnings {
-            println!("  ! {w}");
-        }
-        for w in &archive_warnings {
-            println!("  ! {w}");
-        }
+async fn run_backup(cfg: &Config, projects: &[project::Project], dry_run: bool) -> Result<()> {
+    let started = Instant::now();
+    let snap = snapshot::collect(cfg, projects)?;
+    if snap.files.is_empty() {
+        println!("nothing to back up");
+        return Ok(());
     }
+
+    let filename = naming::archive_filename(&cfg.server_name, &[], cfg.timezone);
+    let tree = snapshot::render_tree(cfg, &snap, &filename);
+    let archive_path = if dry_run {
+        cfg.download_dir.join(&filename)
+    } else {
+        std::env::temp_dir().join(&filename)
+    };
+    let archive_warnings = archive::write_zip(
+        &snap.files,
+        &[("_snapshot/TREE.txt", tree.as_bytes())],
+        &archive_path,
+    )?;
+    let zip_size = std::fs::metadata(&archive_path)?.len();
+
+    let skipped = snapshot::skipped_by_category(&snap);
+    let skipped_total: u64 = skipped.values().sum();
+    let size = format_size(snap.total_size, DECIMAL);
+    let packed = format_size(zip_size, DECIMAL);
+    println!(
+        "snapshot {filename}: {} files, {size} ({packed} packed), {skipped_total} entries skipped",
+        snap.files.len()
+    );
+    for (category, n) in &skipped {
+        println!("  ! {n} x {category}");
+    }
+    println!("  (full tree with skipped entries is in _snapshot/TREE.txt inside the archive)");
+    for w in &archive_warnings {
+        println!("  ! {w}");
+    }
+
+    if dry_run {
+        println!("dry run: kept {} locally, nothing uploaded", archive_path.display());
+        return Ok(());
+    }
+
+    let bucket = storage::bucket(cfg)?;
+    storage::upload_file(&bucket, &archive_path, &filename).await?;
+    let _ = std::fs::remove_file(&archive_path);
+    println!("uploaded {filename} in {:.1}s", started.elapsed().as_secs_f32());
 
     apply_retention(cfg, &bucket).await?;
 
-    if !messages.is_empty() {
-        let used = storage::used_bytes(&bucket).await.unwrap_or(0);
-        let text = format!(
-            "Backup complete:\n{}\n\nstorage used: {}",
-            messages.join("\n"),
-            format_size(used, DECIMAL)
-        );
-        telegram::notify(cfg, &text).await?;
-    }
+    let used = storage::used_bytes(&bucket).await.unwrap_or(0);
+    let text = format!(
+        "Server snapshot: {filename}\n{} files, {size} ({packed} packed), {skipped_total} entries skipped\n\nstorage used: {}",
+        snap.files.len(),
+        format_size(used, DECIMAL)
+    );
+    telegram::notify(cfg, &text).await?;
 
     Ok(())
 }
@@ -160,7 +178,11 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Scan => print_scan(&projects),
         Command::Audit => run_audit(&cfg, &projects)?,
-        Command::Run => run_backup(&cfg, &projects).await?,
+        Command::Run { dry_run } => run_backup(&cfg, &projects, dry_run).await?,
+        Command::Tree => {
+            let snap = snapshot::collect(&cfg, &projects)?;
+            print!("{}", snapshot::render_tree(&cfg, &snap, "(preview)"));
+        }
         Command::Tui => tui::run(&cfg).await?,
     }
 

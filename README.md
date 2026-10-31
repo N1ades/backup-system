@@ -14,7 +14,8 @@ docker compose build
 ```
 docker compose run --rm backup cargo run -- scan    # list found .backup projects
 docker compose run --rm backup cargo run -- audit   # size + skipped-file report
-docker compose run --rm backup cargo run -- run      # backup + upload + retention + telegram
+docker compose run --rm backup cargo run -- tree     # preview the snapshot tree (included + skipped)
+docker compose run --rm backup cargo run -- run      # one snapshot + upload + retention + telegram
 docker compose run --rm backup cargo run -- tui      # browse/download/extract past backups
 ```
 
@@ -25,8 +26,8 @@ rebuilds on file change without a full re-fetch each time.
 
 - `.backup` marks a project root (optional `#name` first line).
 - `.backupignore` = strict `.gitignore` syntax, scoped to that project only.
-- Nested `.backup` → separate child project/archive.
+- Nested `.backup` → separate child project, stored in the same snapshot.
 - Files/dirs over `MAX_FILE_SIZE_MB` / `MAX_DIR_FILE_COUNT` are skipped + logged
   in audit, unless force-included with `!path` in `.backupignore`.
-- Archive name = `server__project__subproject--YYYY-MM-DD-HHMM-TZ.zip`, doubling
-  as the hierarchy index.
+- One snapshot per run: `server--YYYY-MM-DD-HHMM-TZ.zip`, containing
+  `_snapshot/TREE.txt` (everything included, and everything skipped with the reason).

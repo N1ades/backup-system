@@ -1,5 +1,5 @@
 use crate::config::Config;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
@@ -33,12 +33,19 @@ fn s3_key(key: &str) -> &str {
     key.strip_prefix('/').unwrap_or(key)
 }
 
+// Streamed (multipart) so a snapshot of any size never has to fit in memory.
 pub async fn upload_file(bucket: &Bucket, local_path: &Path, key: &str) -> Result<()> {
-    let local_path = local_path.to_path_buf();
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(local_path))
-        .await?
-        .map_err(|e| anyhow::anyhow!("failed to read file for upload: {e}"))?;
-    bucket.put_object(s3_key(key), &bytes).await?;
+    let mut file = tokio::fs::File::open(local_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to open file for upload: {e}"))?;
+    let status = bucket
+        .put_object_stream(&mut file, s3_key(key))
+        .await
+        .with_context(|| format!("S3 upload of {key} failed"))?;
+    let status = status.status_code();
+    if !(200..300).contains(&status) {
+        anyhow::bail!("S3 upload of {key} returned status {status}");
+    }
     Ok(())
 }
 
@@ -57,12 +64,18 @@ pub async fn download_file(bucket: &Bucket, key: &str, dest: &Path) -> Result<()
 }
 
 pub async fn delete_object(bucket: &Bucket, key: &str) -> Result<()> {
-    bucket.delete_object(s3_key(key)).await?;
+    bucket
+        .delete_object(s3_key(key))
+        .await
+        .with_context(|| format!("S3 delete of {key} failed"))?;
     Ok(())
 }
 
 pub async fn list_all(bucket: &Bucket) -> Result<Vec<RemoteObject>> {
-    let pages = bucket.list("".to_string(), None).await?;
+    let pages = bucket
+        .list("".to_string(), None)
+        .await
+        .context("S3 bucket listing failed")?;
     let mut out = Vec::new();
     for page in pages {
         for obj in page.contents {

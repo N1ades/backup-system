@@ -1,4 +1,4 @@
-use crate::project::BackupPlan;
+use crate::project::PlannedFile;
 use anyhow::Result;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
@@ -6,13 +6,21 @@ use std::path::Path;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
-pub fn write_zip(plan: &BackupPlan, dest: &Path) -> Result<Vec<String>> {
+// `extras` are in-memory files (name, contents) written first, e.g. the tree.
+pub fn write_zip(files: &[PlannedFile], extras: &[(&str, &[u8])], dest: &Path) -> Result<Vec<String>> {
     let file = File::create(dest)?;
     let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .large_file(true);
     let mut warnings = Vec::new();
 
-    for pf in &plan.files {
+    for (name, data) in extras {
+        zip.start_file(*name, options)?;
+        zip.write_all(data)?;
+    }
+
+    for pf in files {
         let name = pf.relative.to_string_lossy().replace('\\', "/");
         // A file present during scan can still vanish or become unreadable
         // by the time we archive it (deleted mid-run, permission change,

@@ -14,7 +14,7 @@ humansize = "2"
 ignore = "0.4"
 ratatui = "0.29"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
-rust-s3 = { version = "0.35", default-features = false, features = ["tokio-rustls-tls", "http-credentials"] }
+rust-s3 = { version = "0.35", default-features = false, features = ["tokio-rustls-tls", "http-credentials", "fail-on-err"] }
 tokio = { version = "1", features = ["full"] }
 walkdir = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
