@@ -34,6 +34,17 @@ enum Command {
     /// Print the snapshot tree (what is included and what is skipped)
     Tree,
     Tui,
+    /// Stream stdin into one object `SERVER__NAME--TIMESTAMP.EXT`, then apply retention.
+    /// Nothing is written to local disk. Prints the object key and byte count.
+    Put {
+        /// Chain level for the object, e.g. `dropcat-db`
+        name: String,
+        /// Extension of the streamed content, e.g. `dump` or `tar`
+        #[arg(long, default_value = "bin")]
+        ext: String,
+    },
+    /// Stream one object to stdout, e.g. `get KEY | pg_restore ...` or a checksum readback
+    Get { key: String },
 }
 
 fn print_scan(projects: &[project::Project]) {
@@ -135,6 +146,19 @@ async fn run_backup(cfg: &Config, projects: &[project::Project], dry_run: bool) 
     Ok(())
 }
 
+async fn run_put(cfg: &Config, name: &str, ext: &str) -> Result<()> {
+    let key = naming::object_name(&cfg.server_name, &[name.to_string()], cfg.timezone, ext);
+    let bucket = storage::bucket(cfg)?;
+    let bytes = storage::upload_stream(&bucket, &mut tokio::io::stdin(), &key).await?;
+    if bytes == 0 {
+        storage::delete_object(&bucket, &key).await?;
+        anyhow::bail!("stdin was empty; nothing kept for {key}");
+    }
+    // Machine-readable result for the caller (one JSON line on stdout).
+    println!("{{\"key\":\"{key}\",\"bytes\":{bytes}}}");
+    apply_retention(cfg, &bucket).await
+}
+
 async fn apply_retention(cfg: &Config, bucket: &s3::bucket::Bucket) -> Result<()> {
     use std::collections::HashMap;
 
@@ -149,13 +173,13 @@ async fn apply_retention(cfg: &Config, bucket: &s3::bucket::Bucket) -> Result<()
         }
     }
 
-    for (_, mut group) in by_chain {
+    for ((_, chain), mut group) in by_chain {
         // timestamp format is fixed-width (YYYY-MM-DD-HHMM-TZ), so string
         // order matches chronological order without needing to parse it.
         group.sort_by(|a, b| b.0.cmp(&a.0));
-        for (_, stale_key) in group.into_iter().skip(cfg.retention_keep) {
+        for (_, stale_key) in group.into_iter().skip(cfg.keep_for(&chain)) {
             storage::delete_object(bucket, &stale_key).await?;
-            println!("removed old backup {}", stale_key);
+            eprintln!("removed old backup {}", stale_key);
         }
     }
     Ok(())
@@ -167,7 +191,7 @@ async fn main() -> Result<()> {
     let cfg = Config::load()?;
     let projects = discover_projects(&cfg.backup_root);
 
-    if projects.is_empty() && !matches!(cli.command, Command::Tui) {
+    if projects.is_empty() && !matches!(cli.command, Command::Tui | Command::Put { .. } | Command::Get { .. }) {
         println!(
             "no .backup markers found under {}",
             cfg.backup_root.display()
@@ -184,6 +208,11 @@ async fn main() -> Result<()> {
             print!("{}", snapshot::render_tree(&cfg, &snap, "(preview)"));
         }
         Command::Tui => tui::run(&cfg).await?,
+        Command::Put { name, ext } => run_put(&cfg, &name, &ext).await?,
+        Command::Get { key } => {
+            let bucket = storage::bucket(&cfg)?;
+            storage::download_to(&bucket, &key, &mut tokio::io::stdout()).await?;
+        }
     }
 
     Ok(())

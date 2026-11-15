@@ -17,6 +17,8 @@ docker compose run --rm backup cargo run -- audit   # size + skipped-file report
 docker compose run --rm backup cargo run -- tree     # preview the snapshot tree (included + skipped)
 docker compose run --rm backup cargo run -- run      # one snapshot + upload + retention + telegram
 docker compose run --rm backup cargo run -- tui      # browse/download/extract past backups
+producer | docker compose run --rm -T backup ./target/debug/backup-system put NAME --ext dump
+docker compose run --rm -T backup ./target/debug/backup-system get KEY > file
 ```
 
 Dev mode (`docker-compose.yml`) mounts source + target/cargo caches, so `cargo watch`

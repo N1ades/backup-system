@@ -13,6 +13,8 @@ docker compose run --rm backup cargo run -- tree     # preview the snapshot tree
 docker compose run --rm backup cargo run -- run      # one snapshot zip + upload + retention + telegram
 docker compose run --rm backup cargo run -- run --dry-run  # build the zip into DOWNLOAD_DIR, no upload
 docker compose run --rm backup cargo run -- tui      # browse/download/extract past backups
+producer | docker compose run --rm -T backup ./target/debug/backup-system put NAME --ext dump  # stream stdin to one object
+docker compose run --rm -T backup ./target/debug/backup-system get KEY > file      # stream one object to stdout
 
 # Dev: rebuild inside container (source is bind-mounted)
 docker compose run --rm backup cargo build
@@ -30,7 +32,7 @@ There is no standalone `cargo run` workflow — the container mounts `.env` and 
 | `src/project.rs` | `.backup` marker discovery, ignore rules, backup planning |
 | `src/snapshot.rs` | Merges all project plans into one server snapshot; renders the annotated tree |
 | `src/archive.rs` | ZIP creation (files + in-memory extras such as the tree) |
-| `src/naming.rs` | Archive filename format + parsing |
+| `src/naming.rs` | Object name format (`server__chain--stamp-TZ.ext`) + parsing, timestamps |
 | `src/storage.rs` | S3/R2 upload/download/delete/list |
 | `src/telegram.rs` | Telegram notification sender |
 | `src/tui.rs` | Terminal UI (ratatui) for browsing S3 backups |
@@ -43,6 +45,8 @@ There is no standalone `cargo run` workflow — the container mounts `.env` and 
 - Files over `MAX_FILE_SIZE_MB` or directories over `MAX_DIR_FILE_COUNT` are skipped + logged. Force-include with `!path` in `.backupignore`.
 - One snapshot per run: `server--YYYY-MM-DD-HHMM-TZ.zip`. Paths inside are relative to `BACKUP_ROOT`, so one extract restores the tree.
 - The first zip entry `_snapshot/TREE.txt` is an annotated directory tree: every included file with its size, and every `[SKIPPED: reason]` entry (ignored, oversized, non-regular, or outside any project).
+- `put NAME --ext EXT` streams stdin into `server__NAME--YYYY-MM-DD-HHMM-TZ.EXT` (no local file) and applies the same retention. Callers: `/srv/vrchat-catalog/srv/deploy/backup.py` (DropCat dumps). Use the built binary, not `cargo run`, from scripts.
+- Retention keeps `RETENTION_KEEP` objects per name chain; `RETENTION_KEEP_OVERRIDES=chain=n,...` sets it per chain (DropCat dumps keep 3).
 - Old per-project archives (`server__project--...zip`) may still be in the bucket; retention groups by name chain and never deletes them once no new ones appear.
 
 ## Config
@@ -55,6 +59,6 @@ All config is environment variables (loaded from `.env` via `dotenvy`). See `.en
 - `cargo-watch` is installed in the Docker image; it watches source for live rebuilds.
 - The `BACKUP_SOURCE_DIR` env var is host-side only (used by `docker-compose.yml` volume mount), not read by the Rust code.
 - `rust-s3` is built with `default-features = false`, so `fail-on-err` must stay in the feature list in `Cargo.toml`; without it S3 errors (403, etc.) pass silently and runs print success.
-- Uploads stream via multipart (`put_object_stream`); the compose memory cap is 256M and a full in-memory read of the snapshot would exceed it.
+- Uploads go through `storage::upload_stream`: sequential multipart, one 8 MiB part in memory, size checked by HEAD afterwards. Do not use `Bucket::put_object_stream`: it queues every part before sending, so memory grows with the object and a 1 GB dump exceeds the 256M cap. Downloads stream too (`get_object_to_writer`).
 - Building (linking) needs more than the 256M cap; build once with a temporary compose override of `deploy.resources.limits.memory` (~1.5G). Running the built binary fits in 256M.
 - S3 client uses `rustls-tls` (not native-tls). If adding crates that need TLS, prefer rustls-compatible options.

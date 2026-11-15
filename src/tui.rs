@@ -31,40 +31,16 @@ struct RenderRow {
     version_idx: Option<usize>, // None если это сама модель/папка, Some(i) если это конкретная версия в поддереве
 }
 
-fn build_tree(objects: Vec<storage::RemoteObject>) -> Vec<ModelNode> {
+fn build_tree(objects: Vec<storage::RemoteObject>, tz: chrono_tz::Tz) -> Vec<ModelNode> {
     use std::collections::BTreeMap;
-    use chrono::FixedOffset;
-    
+
     let mut groups: BTreeMap<Vec<String>, Vec<Version>> = BTreeMap::new();
-    
-    // Московское время (MSK) — это UTC+3
-    let msk_offset = FixedOffset::east_opt(3 * 3600).unwrap();
 
     for o in objects {
         if let Some(p) = parse_archive_filename(&o.key) {
+            let date = p.time(tz).unwrap_or_else(Utc::now); // fallback for an unexpected format
             let mut chain = vec![p.server];
             chain.extend(p.chain);
-            
-            // Вытаскиваем дату: server1__srv--2026-07-19-1657-MSK.zip
-            // Сплитим по "--" и берем вторую часть
-            let date = o.key
-                .split("--")
-                .nth(1)
-                .and_then(|part| {
-                    // Отрезаем "-MSK.zip" или ".zip", оставляя "2026-07-19-1657"
-                    let clean_date = part.split("-MSK").next().unwrap_or(part);
-                    let clean_date = clean_date.trim_end_matches(".zip");
-                    
-                    // Парсим "YYYY-MM-DD-HHMM"
-                    chrono::NaiveDateTime::parse_from_str(clean_date, "%Y-%m-%d-%H%M")
-                        .map(|naive| {
-                            // Привязываем к таймзоне MSK (UTC+3) и переводим в UTC
-                            let datetime_msk = naive.and_local_timezone(msk_offset).unwrap();
-                            datetime_msk.with_timezone(&Utc)
-                        })
-                        .ok()
-                })
-                .unwrap_or_else(Utc::now); // Фолбек на случай непредвиденного формата
 
             groups.entry(chain).or_default().push(Version {
                 key: o.key,
@@ -119,7 +95,7 @@ fn format_ago(date: DateTime<Utc>) -> String {
 pub async fn run(cfg: &Config) -> Result<()> {
     let bucket = storage::bucket(cfg)?;
     let objects = storage::list_all(&bucket).await?;
-    let mut nodes = build_tree(objects);
+    let mut nodes = build_tree(objects, cfg.timezone);
 
     if nodes.is_empty() {
         println!("No backups found in storage yet.");
@@ -202,7 +178,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
                                 })?;
                                 
                                 match download_and_extract(cfg, &bucket, &key_to_download).await {
-                                    Ok(dest) => status = format!("extracted to {}", dest.display()),
+                                    Ok(dest) => status = format!("saved to {}", dest.display()),
                                     Err(e) => status = format!("failed: {e}"),
                                 }
                             } else {
@@ -239,6 +215,12 @@ async fn download_and_extract(
     let filename = std::path::Path::new(key)
         .file_name()
         .unwrap_or(std::ffi::OsStr::new(key));
+    if parsed.ext != "zip" {
+        // Streamed objects (database dumps, tars) are restored by their own tools.
+        let target = dest.join(filename);
+        storage::download_file(bucket, key, &target).await?;
+        return Ok(target);
+    }
     let tmp_zip = std::env::temp_dir().join(filename);
     storage::download_file(bucket, key, &tmp_zip).await?;
 
