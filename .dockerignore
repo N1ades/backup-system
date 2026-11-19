@@ -1,0 +1,6 @@
+.env
+.git
+target
+downloads
+docker-volumes-backup-*
+rust_backup.zip

@@ -1,20 +1,18 @@
+# Runtime only: the image is built by GitHub Actions and pulled from GHCR.
+#   docker compose run --rm backup run            # nightly snapshot
+#   producer | docker compose run --rm -T backup put NAME --ext dump
+#   docker compose pull                           # take the latest master build
 services:
   backup:
-    build: .
+    image: ghcr.io/n1ades/backup-system:latest
+    pull_policy: missing
     env_file: .env
     deploy:
       resources:
         limits:
           memory: 256M
     volumes:
-      - .:/app
-      - cargo-cache:/usr/local/cargo/registry
-      - target-cache:/app/target
       - ${BACKUP_SOURCE_DIR:-/srv}:/srv:ro
-      - ${DOWNLOAD_DIR:-./downloads}:/downloads
+      - ${DOWNLOAD_DIR_HOST:-./downloads}:/app/downloads
     stdin_open: true
     tty: true
-
-volumes:
-  cargo-cache:
-  target-cache:

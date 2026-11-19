@@ -12,17 +12,17 @@ docker compose build
 ## Use
 
 ```
-docker compose run --rm backup cargo run -- scan    # list found .backup projects
-docker compose run --rm backup cargo run -- audit   # size + skipped-file report
-docker compose run --rm backup cargo run -- tree     # preview the snapshot tree (included + skipped)
-docker compose run --rm backup cargo run -- run      # one snapshot + upload + retention + telegram
-docker compose run --rm backup cargo run -- tui      # browse/download/extract past backups
-producer | docker compose run --rm -T backup ./target/debug/backup-system put NAME --ext dump
-docker compose run --rm -T backup ./target/debug/backup-system get KEY > file
+docker compose run --rm backup scan    # list found .backup projects
+docker compose run --rm backup audit   # size + skipped-file report
+docker compose run --rm backup tree     # preview the snapshot tree (included + skipped)
+docker compose run --rm backup run      # one snapshot + upload + retention + telegram
+docker compose run --rm backup tui      # browse/download/extract past backups
+producer | docker compose run --rm -T backup put NAME --ext dump
+docker compose run --rm -T backup get KEY > file
 ```
 
-Dev mode (`docker-compose.yml`) mounts source + target/cargo caches, so `cargo watch`
-rebuilds on file change without a full re-fetch each time.
+The image `ghcr.io/n1ades/backup-system` is built by GitHub Actions on every push to `master`
+(tags `v*` also publish a GitHub Release with the binary). Update the server with `docker compose pull`.
 
 ## Rules recap
 

@@ -2,26 +2,31 @@
 
 ## Project
 
-Single-crate Rust CLI (`backup-system`) for backing up projects marked with `.backup` files to S3/R2. Containerized (Docker + `cargo-watch`). No CI, no linting config, no workspace.
+Single-crate Rust CLI (`backup-system`) for backing up projects marked with `.backup` files to S3/R2. Release builds come from GitHub Actions (`.github/workflows/release.yml`): every push to `master` publishes
+`ghcr.io/n1ades/backup-system:latest` (+ `sha-<commit>`), tags `v*` also attach the binary to a GitHub Release.
+The server only pulls that slim image (debian-slim + binary); it never compiles. No linting config, no workspace.
 
 ## Key Commands
 
 ```bash
-docker compose run --rm backup cargo run -- scan    # list discovered projects
-docker compose run --rm backup cargo run -- audit   # size + skipped-file report
-docker compose run --rm backup cargo run -- tree     # preview the snapshot tree (included + skipped)
-docker compose run --rm backup cargo run -- run      # one snapshot zip + upload + retention + telegram
-docker compose run --rm backup cargo run -- run --dry-run  # build the zip into DOWNLOAD_DIR, no upload
-docker compose run --rm backup cargo run -- tui      # browse/download/extract past backups
-producer | docker compose run --rm -T backup ./target/debug/backup-system put NAME --ext dump  # stream stdin to one object
-docker compose run --rm -T backup ./target/debug/backup-system get KEY > file      # stream one object to stdout
+docker compose run --rm backup scan    # list discovered projects
+docker compose run --rm backup audit   # size + skipped-file report
+docker compose run --rm backup tree     # preview the snapshot tree (included + skipped)
+docker compose run --rm backup run      # one snapshot zip + upload + retention + telegram
+docker compose run --rm backup run --dry-run  # build the zip into DOWNLOAD_DIR, no upload
+docker compose run --rm backup tui      # browse/download/extract past backups
+producer | docker compose run --rm -T backup put NAME --ext dump  # stream stdin to one object
+docker compose run --rm -T backup get KEY > file      # stream one object to stdout
 
-# Dev: rebuild inside container (source is bind-mounted)
-docker compose run --rm backup cargo build
-docker compose run --rm backup cargo test
+# Deploy: push to master, wait for the release workflow, then on the server
+docker compose pull
+
+# Dev: anywhere with Rust 1.85
+cargo test
+cargo build --release
 ```
 
-There is no standalone `cargo run` workflow — the container mounts `.env` and the host `/srv` directory. Always run via `docker compose`.
+On the server always run via `docker compose` — it supplies `.env` and mounts the host `/srv` read-only.
 
 ## Architecture
 
@@ -45,7 +50,7 @@ There is no standalone `cargo run` workflow — the container mounts `.env` and 
 - Files over `MAX_FILE_SIZE_MB` or directories over `MAX_DIR_FILE_COUNT` are skipped + logged. Force-include with `!path` in `.backupignore`.
 - One snapshot per run: `server--YYYY-MM-DD-HHMM-TZ.zip`. Paths inside are relative to `BACKUP_ROOT`, so one extract restores the tree.
 - The first zip entry `_snapshot/TREE.txt` is an annotated directory tree: every included file with its size, and every `[SKIPPED: reason]` entry (ignored, oversized, non-regular, or outside any project).
-- `put NAME --ext EXT` streams stdin into `server__NAME--YYYY-MM-DD-HHMM-TZ.EXT` (no local file) and applies the same retention. Callers: `/srv/vrchat-catalog/srv/deploy/backup.py` (DropCat dumps). Use the built binary, not `cargo run`, from scripts.
+- `put NAME --ext EXT` streams stdin into `server__NAME--YYYY-MM-DD-HHMM-TZ.EXT` (no local file) and applies the same retention. Callers: `/srv/vrchat-catalog/srv/deploy/backup.py` (DropCat dumps). Callers use `docker compose run --rm -T backup put ...`.
 - Retention keeps `RETENTION_KEEP` objects per name chain; `RETENTION_KEEP_OVERRIDES=chain=n,...` sets it per chain (DropCat dumps keep 3).
 - Old per-project archives (`server__project--...zip`) may still be in the bucket; retention groups by name chain and never deletes them once no new ones appear.
 
@@ -55,8 +60,9 @@ All config is environment variables (loaded from `.env` via `dotenvy`). See `.en
 
 ## Gotchas
 
-- Dockerfile uses `rust:1.85-bookworm` — keep Rust version aligned.
-- `cargo-watch` is installed in the Docker image; it watches source for live rebuilds.
+- Dockerfile build stage and the workflow use Rust 1.85 — keep them aligned.
+- Never build on the server: compiling under the 256M compose limit OOM-kills the linker.
+- `.dockerignore` keeps `.env` out of the build context: the image is public.
 - The `BACKUP_SOURCE_DIR` env var is host-side only (used by `docker-compose.yml` volume mount), not read by the Rust code.
 - `rust-s3` is built with `default-features = false`, so `fail-on-err` must stay in the feature list in `Cargo.toml`; without it S3 errors (403, etc.) pass silently and runs print success.
 - Uploads go through `storage::upload_stream`: sequential multipart, one 8 MiB part in memory, size checked by HEAD afterwards. Do not use `Bucket::put_object_stream`: it queues every part before sending, so memory grows with the object and a 1 GB dump exceeds the 256M cap. Downloads stream too (`get_object_to_writer`).
